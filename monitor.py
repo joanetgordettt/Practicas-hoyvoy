@@ -13,6 +13,12 @@ from zoneinfo import ZoneInfo
 URL = os.environ.get("TARGET_URL", "https://fke12wzwjp.zite.so")
 STATE = Path("state.json")
 SUBJECT = "🚗 ¡Nuevas prácticas de coche disponibles!"
+SUBJECT_SIN_CAMBIOS = "✅ Sin novedades en las prácticas"
+
+# True = en cada comprobación sin novedades también te llega un correo.
+# Para dejar de recibirlos, cambia True por False.
+AVISAR_SIN_CAMBIOS = True
+
 # Solo para el modo de texto libre: líneas a ignorar (regex separadas por "||")
 IGNORE = [re.compile(p) for p in os.environ.get("IGNORE_REGEX", "").split("||") if p]
 
@@ -116,11 +122,32 @@ def build_html(mode, rows, now):
 
 
 def build_text(mode, rows, now):
-    out = [f"{SUBJECT}", ""]
+    out = [SUBJECT, ""]
     for r in rows:
         out.append("• " + (" · ".join(r) if mode == "classes" else " ".join(x for x in r if x)))
     out += ["", f"Web: {URL}", f"Detectado el {now}"]
     return "\n".join(out)
+
+
+def build_html_sin_cambios(total, now):
+    if total:
+        detalle = (
+            f"Ahora mismo hay <b>{total} {'práctica' if total == 1 else 'prácticas'}</b> "
+            "en la web, pero ninguna nueva desde la última comprobación."
+        )
+    else:
+        detalle = "No hay prácticas nuevas desde la última comprobación."
+    return f"""\
+<!DOCTYPE html>
+<html lang="es"><body style="margin:0;padding:0;background:#ffffff;">
+<div style="font-family:Arial,Helvetica,sans-serif;color:#1a1a1a;max-width:640px;
+ margin:0 auto;padding:20px 16px;font-size:18px;line-height:1.5;">
+ <p style="margin:0 0 12px;"><b>Sin novedades.</b></p>
+ <p style="margin:0 0 24px;">{detalle}</p>
+ <p style="margin:0;font-size:16px;">
+  <a href="{html.escape(URL)}" style="color:#1a56db;">Abrir la web de prácticas</a></p>
+ <p style="margin:20px 0 0;font-size:13px;color:#8a8a8a;">Comprobado el {now}</p>
+</div></body></html>"""
 
 
 def mask(addr):
@@ -128,22 +155,36 @@ def mask(addr):
     return f"{user[:2]}***@{domain}"
 
 
-def send_email(mode, rows):
-    now = datetime.now(ZoneInfo("Europe/Madrid")).strftime("%d/%m/%Y %H:%M")
+def deliver(subject, text, html_body):
     recipients = [r for r in re.split(r"[,;\s]+", os.environ["MAIL_TO"].strip()) if r]
     sender = os.environ["SMTP_USER"].strip()
 
     msg = EmailMessage()
-    msg["Subject"] = SUBJECT
+    msg["Subject"] = subject
     msg["From"] = sender
     msg["To"] = ", ".join(recipients)
-    msg.set_content(build_text(mode, rows, now))
-    msg.add_alternative(build_html(mode, rows, now), subtype="html")
+    msg.set_content(text)
+    msg.add_alternative(html_body, subtype="html")
 
     print(f"Enviando desde {mask(sender)} a {', '.join(mask(r) for r in recipients)}")
     with smtplib.SMTP_SSL("smtp.gmail.com", 465) as s:
         s.login(sender, os.environ["SMTP_PASS"].strip())
         s.send_message(msg, to_addrs=recipients)
+
+
+def now_madrid():
+    return datetime.now(ZoneInfo("Europe/Madrid")).strftime("%d/%m/%Y %H:%M")
+
+
+def send_email(mode, rows):
+    now = now_madrid()
+    deliver(SUBJECT, build_text(mode, rows, now), build_html(mode, rows, now))
+
+
+def send_sin_cambios(total):
+    now = now_madrid()
+    texto = f"Sin novedades en las prácticas.\nComprobado el {now}\nWeb: {URL}"
+    deliver(SUBJECT_SIN_CAMBIOS, texto, build_html_sin_cambios(total, now))
 
 
 # ---------- estado ----------
@@ -184,6 +225,8 @@ def main():
         send_email(mode, [current[k] for k in new_keys])
     else:
         print("Sin cambios.")
+        if AVISAR_SIN_CAMBIOS:
+            send_sin_cambios(len(current))
 
     if set(current) != previous:
         save_state(mode, current)
