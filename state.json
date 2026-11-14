@@ -2,7 +2,7 @@
   "mode": "lines",
   "items": [
     "Avisos de Prácticas",
-    "Revisado hace menos de un minuto",
+    "Revisado hace 38 minutos",
     "Revisar ahora",
     "HoyVoy",
     "4",
@@ -29,6 +29,7 @@
     "Jueves 11 De Febrero",
     "11:15",
     "12:00",
+    "API call failed (500): {\"statusCode\":500,\"error\":\"Internal Server Error\",\"message\":\"Gmail: Request had insufficient authentication scopes.\"}",
     "Made with",
     "✕",
     "HoyVoy -> https://es.hoy-voy.com/intranet/vilanova/b/comprar-practicas",
