@@ -2,7 +2,7 @@ name: Vigilar web de prácticas
 
 on:
   schedule:
-    - cron: "*/5 * * * *"   # cada 5 min (mínimo de GitHub; puede retrasarse unos minutos)
+    - cron: "*/2 * * * *"   # cada 5 min (mínimo de GitHub; puede retrasarse unos minutos)
   workflow_dispatch:         # botón "Run workflow" para refrescar a mano
 
 permissions:
