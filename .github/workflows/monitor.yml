@@ -1,0 +1,42 @@
+name: Vigilar web de prácticas
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"   # cada 5 min (mínimo de GitHub; puede retrasarse unos minutos)
+  workflow_dispatch:         # botón "Run workflow" para refrescar a mano
+
+permissions:
+  contents: write
+
+concurrency:
+  group: monitor
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-v1
+      - run: pip install playwright && playwright install --with-deps chromium
+      - name: Comprobar web
+        run: python monitor.py
+        env:
+          TARGET_URL: https://fke12wzwjp.zite.so
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          MAIL_TO: ${{ secrets.MAIL_TO }}
+      - name: Guardar estado
+        run: |
+          git config user.name "monitor-bot"
+          git config user.email "monitor-bot@users.noreply.github.com"
+          git add state.json
+          git diff --cached --quiet || (git commit -m "Actualizar estado" && git push)
