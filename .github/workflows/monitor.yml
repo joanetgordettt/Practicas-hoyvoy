@@ -29,25 +29,26 @@ jobs:
           key: playwright-${{ runner.os }}-v1
       - run: pip install playwright && playwright install --with-deps chromium
 
-      - name: Vigilar la web (una comprobación cada 5 min durante ~55 min)
+      - name: Vigilar la web (una comprobación cada minuto durante ~55 min)
         env:
           TARGET_URL: https://fke12wzwjp.zite.so
           SMTP_USER: ${{ secrets.SMTP_USER }}
           SMTP_PASS: ${{ secrets.SMTP_PASS }}
           MAIL_TO: ${{ secrets.MAIL_TO }}
+          AVISAR_CADA_MIN: "5"   # cada cuántos minutos llega el correo de "Sin novedades"
         run: |
           git config user.name "monitor-bot"
           git config user.email "monitor-bot@users.noreply.github.com"
           while [ $SECONDS -lt 3300 ]; do
             echo "=== Comprobación $(date -u '+%H:%M:%S') UTC ==="
             git pull --rebase --autostash -q || true
-            python monitor.py || echo "Esta comprobación ha fallado, se reintenta en 5 min"
+            python monitor.py || echo "Esta comprobación ha fallado, se reintenta enseguida"
             git add state.json
             if ! git diff --cached --quiet; then
               git commit -q -m "Actualizar estado"
               git push -q || (git pull --rebase -q && git push -q) || true
             fi
-            sleep 300
+            sleep 60   # segundos entre comprobaciones
           done
 
       - name: Lanzar el siguiente turno
