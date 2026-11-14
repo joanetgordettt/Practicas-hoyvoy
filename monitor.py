@@ -5,6 +5,8 @@ import os
 import re
 import smtplib
 import sys
+import tempfile
+import time
 from datetime import datetime
 from email.message import EmailMessage
 from pathlib import Path
@@ -18,6 +20,10 @@ SUBJECT_SIN_CAMBIOS = "✅ Sin novedades en las prácticas"
 # True = en cada comprobación sin novedades también te llega un correo.
 # Para dejar de recibirlos, cambia True por False.
 AVISAR_SIN_CAMBIOS = True
+# Cada cuántos minutos como mucho se envía el correo de "Sin novedades"
+# (la web se comprueba más a menudo, pero este aviso se espacia).
+AVISAR_CADA_MIN = float(os.environ.get("AVISAR_CADA_MIN", "5"))
+HEARTBEAT_FILE = Path(os.environ.get("RUNNER_TEMP", tempfile.gettempdir())) / "ultimo_aviso_sin_cambios"
 
 # Solo para el modo de texto libre: líneas a ignorar (regex separadas por "||")
 IGNORE = [re.compile(p) for p in os.environ.get("IGNORE_REGEX", "").split("||") if p]
@@ -181,6 +187,16 @@ def send_email(mode, rows):
     deliver(SUBJECT, build_text(mode, rows, now), build_html(mode, rows, now))
 
 
+def toca_aviso_sin_cambios():
+    if not AVISAR_SIN_CAMBIOS:
+        return False
+    try:
+        ultimo = float(HEARTBEAT_FILE.read_text())
+    except Exception:
+        ultimo = 0.0
+    return time.time() - ultimo >= AVISAR_CADA_MIN * 60 - 30  # margen por la duración de cada vuelta
+
+
 def send_sin_cambios(total):
     now = now_madrid()
     texto = f"Sin novedades en las prácticas.\nComprobado el {now}\nWeb: {URL}"
@@ -225,8 +241,9 @@ def main():
         send_email(mode, [current[k] for k in new_keys])
     else:
         print("Sin cambios.")
-        if AVISAR_SIN_CAMBIOS:
+        if toca_aviso_sin_cambios():
             send_sin_cambios(len(current))
+            HEARTBEAT_FILE.write_text(str(time.time()))
 
     if set(current) != previous:
         save_state(mode, current)
