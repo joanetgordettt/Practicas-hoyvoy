@@ -17,16 +17,12 @@ STATE = Path("state.json")
 SUBJECT = "🚗 ¡Nuevas prácticas de coche disponibles!"
 SUBJECT_SIN_CAMBIOS = "✅ Sin novedades en las prácticas"
 
-# True = en cada comprobación sin novedades también te llega un correo.
+# True = también te llega un correo cuando no hay novedades.
 # Para dejar de recibirlos, cambia True por False.
 AVISAR_SIN_CAMBIOS = True
 # Cada cuántos minutos como mucho se envía el correo de "Sin novedades"
-# (la web se comprueba más a menudo, pero este aviso se espacia).
 AVISAR_CADA_MIN = float(os.environ.get("AVISAR_CADA_MIN", "5"))
 HEARTBEAT_FILE = Path(os.environ.get("RUNNER_TEMP", tempfile.gettempdir())) / "ultimo_aviso_sin_cambios"
-
-# Solo para el modo de texto libre: líneas a ignorar (regex separadas por "||")
-IGNORE = [re.compile(p) for p in os.environ.get("IGNORE_REGEX", "").split("||") if p]
 
 DATE = r"\d{1,2}[-/.]\d{1,2}[-/.]\d{4}"
 TIME = r"\d{1,2}:\d{2}\s*[-–—]\s*\d{1,2}:\d{2}"
@@ -43,11 +39,8 @@ def fetch_page():
         page.goto(URL, wait_until="networkidle", timeout=60000)
         page.wait_for_timeout(3000)  # margen para que cargue el contenido dinámico
         text = page.inner_text("body")
-        links = page.eval_on_selector_all(
-            "a[href]", "els => els.map(e => (e.innerText.trim() + ' -> ' + e.href))"
-        )
         browser.close()
-    return text, links
+    return text
 
 
 def parse_classes(text):
@@ -70,46 +63,20 @@ def parse_classes(text):
     return dict(sorted(found.items(), key=lambda kv: sort_key(kv[1])))
 
 
-def parse_lines(text, links):
-    """Modo de reserva si no se detectan clases: cada línea de texto/enlace."""
-    lines = [l.strip() for l in text.splitlines() if l.strip()]
-    lines += [l for l in links if l.strip(" ->")]
-    lines = [l for l in lines if not any(r.search(l) for r in IGNORE)]
-    out = {}
-    for l in dict.fromkeys(lines):
-        if " -> " in l:
-            t, u = l.rsplit(" -> ", 1)
-            out[l] = (t.strip() or u.strip(), u.strip())
-        else:
-            out[l] = (l, "")
-    return out
-
-
 # ---------- correo ----------
-def build_html(mode, rows, now):
+def build_html(rows, now):
     n = len(rows)
     th = "text-align:left;padding:16px 12px;font-weight:700;"
     td = "padding:16px 12px;"
-    if mode == "classes":
-        head = "".join(f'<th style="{th}">{h}</th>' for h in ("Fecha", "Hora", "Coche", "Profesor/a"))
-        body = "".join(
-            "<tr>" + "".join(f'<td style="{td}">{html.escape(c)}</td>' for c in r) + "</tr>"
-            for r in rows
-        )
-        intro = (
-            f"Hemos encontrado <b>{n} {'práctica nueva' if n == 1 else 'prácticas nuevas'}</b> "
-            "disponible" + ("" if n == 1 else "s") + "."
-        )
-    else:
-        head = f'<th style="{th}">Detalle</th><th style="{th}">Enlace</th>'
-        body = "".join(
-            f'<tr><td style="{td}">{html.escape(t)}</td><td style="{td}">'
-            + (f'<a href="{html.escape(u)}" style="color:#1a56db;">Ver</a>' if u else "—")
-            + "</td></tr>"
-            for t, u in rows
-        )
-        intro = f"Hemos detectado <b>{n} {'novedad' if n == 1 else 'novedades'}</b> en la web."
-
+    head = "".join(f'<th style="{th}">{h}</th>' for h in ("Fecha", "Hora", "Coche", "Profesor/a"))
+    body = "".join(
+        "<tr>" + "".join(f'<td style="{td}">{html.escape(c)}</td>' for c in r) + "</tr>"
+        for r in rows
+    )
+    intro = (
+        f"Hemos encontrado <b>{n} {'práctica nueva' if n == 1 else 'prácticas nuevas'}</b> "
+        "disponible" + ("" if n == 1 else "s") + "."
+    )
     return f"""\
 <!DOCTYPE html>
 <html lang="es"><body style="margin:0;padding:0;background:#ffffff;">
@@ -127,10 +94,9 @@ def build_html(mode, rows, now):
 </div></body></html>"""
 
 
-def build_text(mode, rows, now):
+def build_text(rows, now):
     out = [SUBJECT, ""]
-    for r in rows:
-        out.append("• " + (" · ".join(r) if mode == "classes" else " ".join(x for x in r if x)))
+    out += ["• " + " · ".join(r) for r in rows]
     out += ["", f"Web: {URL}", f"Detectado el {now}"]
     return "\n".join(out)
 
@@ -182,9 +148,9 @@ def now_madrid():
     return datetime.now(ZoneInfo("Europe/Madrid")).strftime("%d/%m/%Y %H:%M")
 
 
-def send_email(mode, rows):
+def send_email(rows):
     now = now_madrid()
-    deliver(SUBJECT, build_text(mode, rows, now), build_html(mode, rows, now))
+    deliver(SUBJECT, build_text(rows, now), build_html(rows, now))
 
 
 def toca_aviso_sin_cambios():
@@ -208,37 +174,39 @@ def load_state():
     if not STATE.exists():
         return None
     data = json.loads(STATE.read_text())
-    # Formato antiguo (lista de líneas): se vuelve a guardar sin avisar
-    return data if isinstance(data, dict) else {"mode": "legacy", "items": []}
+    # Formatos antiguos: se vuelve a guardar sin avisar
+    if isinstance(data, dict) and data.get("mode") == "classes":
+        return data
+    return {"mode": "legacy", "items": []}
 
 
-def save_state(mode, current):
-    STATE.write_text(json.dumps({"mode": mode, "items": list(current)}, ensure_ascii=False, indent=2))
+def save_state(current):
+    STATE.write_text(json.dumps({"mode": "classes", "items": list(current)}, ensure_ascii=False, indent=2))
 
 
 def main():
-    text, links = fetch_page()
+    text = fetch_page()
     if len(text.strip()) < 20:
         print("No se pudo leer la web; no toco el estado.")
         sys.exit(1)
 
-    state = load_state()
-    classes = parse_classes(text)
-    mode = "classes" if (classes or (state and state["mode"] == "classes")) else "lines"
-    current = classes if mode == "classes" else parse_lines(text, links)
-    print(f"Modo: {mode} · {len(current)} elementos detectados")
+    current = parse_classes(text)
+    print(f"{len(current)} prácticas detectadas en la web")
+    if not current and re.search(TIME, text):
+        print("AVISO: hay horas en la web pero no reconozco el formato de las prácticas.")
 
+    state = load_state()
     if state is None or state["mode"] == "legacy":
-        save_state(mode, current)
+        save_state(current)
         print("Primera ejecución con este formato: estado guardado, sin enviar correo.")
         return
 
-    previous = set(state["items"]) if state["mode"] == mode else set()
+    previous = set(state["items"])
     new_keys = [k for k in current if k not in previous]
 
     if new_keys:
-        print(f"{len(new_keys)} elementos nuevos, enviando correo.")
-        send_email(mode, [current[k] for k in new_keys])
+        print(f"{len(new_keys)} prácticas nuevas, enviando correo.")
+        send_email([current[k] for k in new_keys])
     else:
         print("Sin cambios.")
         if toca_aviso_sin_cambios():
@@ -246,7 +214,7 @@ def main():
             HEARTBEAT_FILE.write_text(str(time.time()))
 
     if set(current) != previous:
-        save_state(mode, current)
+        save_state(current)
 
 
 if __name__ == "__main__":
