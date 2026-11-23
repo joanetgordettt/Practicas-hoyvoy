@@ -7,7 +7,7 @@ import smtplib
 import sys
 import tempfile
 import time
-from datetime import datetime
+from datetime import date, datetime
 from email.message import EmailMessage
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -24,9 +24,14 @@ AVISAR_SIN_CAMBIOS = True
 AVISAR_CADA_MIN = float(os.environ.get("AVISAR_CADA_MIN", "5"))
 HEARTBEAT_FILE = Path(os.environ.get("RUNNER_TEMP", tempfile.gettempdir())) / "ultimo_aviso_sin_cambios"
 
-DATE = r"\d{1,2}[-/.]\d{1,2}[-/.]\d{4}"
-TIME = r"\d{1,2}:\d{2}\s*[-–—]\s*\d{1,2}:\d{2}"
-CLASS_RE = re.compile(rf"({DATE})\s+({TIME})")
+DAY_RE = re.compile(
+    r"^(lunes|martes|mi[eé]rcoles|jueves|viernes|s[aá]bado|domingo)\s+(\d{1,2})\s+de\s+([a-záéíóú]+)$",
+    re.IGNORECASE,
+)
+TIME_RE = re.compile(r"^\d{1,2}:\d{2}$")
+MESES = {m: i for i, m in enumerate(
+    "enero febrero marzo abril mayo junio julio agosto septiembre octubre noviembre diciembre".split(), 1)}
+COLUMNAS = ("Fecha", "Hora", "Coche", "Profesor/a", "Lugar", "Precio")
 
 
 # ---------- lectura de la web ----------
@@ -37,61 +42,107 @@ def fetch_page():
         browser = p.chromium.launch()
         page = browser.new_page()
         page.goto(URL, wait_until="networkidle", timeout=60000)
-        page.wait_for_timeout(3000)  # margen para que cargue el contenido dinámico
+        try:
+            page.wait_for_selector("text=Disponibles", timeout=30000)
+        except Exception:
+            pass
+        page.wait_for_timeout(3000)  # margen para que carguen las tarjetas
         text = page.inner_text("body")
         browser.close()
     return text
 
 
+def orden_fecha(fecha_txt, hora):
+    m = DAY_RE.match(fecha_txt)
+    try:
+        hoy = datetime.now(ZoneInfo("Europe/Madrid")).date()
+        d = date(hoy.year, MESES[m.group(3).lower()], int(m.group(2)))
+        if (hoy - d).days > 60:  # la web no muestra el año: si ya pasó, es del año siguiente
+            d = d.replace(year=hoy.year + 1)
+        return (d.year, d.month, d.day, hora)
+    except Exception:
+        return (9999, 0, 0, hora)
+
+
 def parse_classes(text):
-    """Busca filas tipo: fecha, hora, coche, profesor. Devuelve {clave: fila}."""
-    matches = list(CLASS_RE.finditer(text))
+    """Lee las tarjetas: día (título), hora inicio/fin, tipo, profesor, coche, lugar y precio."""
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
     found = {}
-    for i, m in enumerate(matches):
-        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
-        tokens = [t.strip() for t in re.split(r"[\t\n]+", text[m.end():end]) if t.strip()]
-        fecha = m.group(1)
-        hora = re.sub(r"\s*[-–—]\s*", "-", m.group(2))
-        coche = tokens[0] if tokens else "—"
-        profe = tokens[1] if len(tokens) > 1 else "—"
-        found[f"{fecha}|{hora}|{coche}|{profe}"] = (fecha, hora, coche, profe)
-
-    def sort_key(row):
-        d, mth, y = re.split(r"[-/.]", row[0])
-        return (int(y), int(mth), int(d), row[1])
-
-    return dict(sorted(found.items(), key=lambda kv: sort_key(kv[1])))
+    fecha = None
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if DAY_RE.match(line):
+            fecha = line
+            i += 1
+            continue
+        if fecha and TIME_RE.match(line):
+            inicio, fin, j = line, "", i + 1
+            if j < len(lines) and TIME_RE.match(lines[j]):
+                fin, j = lines[j], j + 1
+            tokens = []
+            while j < len(lines) and not DAY_RE.match(lines[j]) and not TIME_RE.match(lines[j]):
+                tokens.append(lines[j])
+                j += 1
+            precio = "—"
+            for k, t in enumerate(tokens):
+                if "€" in t:
+                    precio, tokens = t, tokens[:k]  # lo que hay tras el precio (pie de página) se descarta
+                    break
+            if len(tokens) >= 4:
+                _tipo, profe, coche, lugar = tokens[:4]
+            else:
+                profe, coche, lugar = (tokens + ["—"] * 3)[:3]
+            hora = f"{inicio}-{fin}" if fin else inicio
+            clave = f"{fecha}|{hora}|{profe}|{coche}|{lugar}"
+            found[clave] = (fecha, hora, coche, profe, lugar, precio)
+            i = j
+            continue
+        i += 1
+    return dict(sorted(found.items(), key=lambda kv: orden_fecha(kv[1][0], kv[1][1])))
 
 
 # ---------- correo ----------
-def build_html(rows, now):
-    n = len(rows)
-    th = "text-align:left;padding:16px 12px;font-weight:700;"
-    td = "padding:16px 12px;"
-    head = "".join(f'<th style="{th}">{h}</th>' for h in ("Fecha", "Hora", "Coche", "Profesor/a"))
+def tabla_html(rows):
+    th = "text-align:left;padding:14px 8px;font-weight:700;"
+    td = "padding:14px 8px;"
+    head = "".join(f'<th style="{th}">{h}</th>' for h in COLUMNAS)
     body = "".join(
         "<tr>" + "".join(f'<td style="{td}">{html.escape(c)}</td>' for c in r) + "</tr>"
         for r in rows
     )
+    return (
+        '<table width="100%" cellpadding="0" cellspacing="0" '
+        'style="border-collapse:collapse;font-size:16px;">'
+        f'<tr style="background:#f2f2f2;">{head}</tr>{body}</table>'
+    )
+
+
+def envoltorio(contenido):
+    return f"""\
+<!DOCTYPE html>
+<html lang="es"><body style="margin:0;padding:0;background:#ffffff;">
+<div style="font-family:Arial,Helvetica,sans-serif;color:#1a1a1a;max-width:720px;
+ margin:0 auto;padding:20px 16px;font-size:18px;line-height:1.5;">
+{contenido}
+</div></body></html>"""
+
+
+def enlace_web():
+    return (f'<p style="margin:28px 0 0;font-size:16px;">'
+            f'<a href="{html.escape(URL)}" style="color:#1a56db;">Abrir la web de prácticas</a></p>')
+
+
+def build_html(rows, now):
+    n = len(rows)
     intro = (
         f"Hemos encontrado <b>{n} {'práctica nueva' if n == 1 else 'prácticas nuevas'}</b> "
         "disponible" + ("" if n == 1 else "s") + "."
     )
-    return f"""\
-<!DOCTYPE html>
-<html lang="es"><body style="margin:0;padding:0;background:#ffffff;">
-<div style="font-family:Arial,Helvetica,sans-serif;color:#1a1a1a;max-width:640px;
- margin:0 auto;padding:20px 16px;font-size:18px;line-height:1.5;">
- <p style="margin:0 0 24px;">{intro}</p>
- <table width="100%" cellpadding="0" cellspacing="0"
-  style="border-collapse:collapse;font-size:17px;">
-  <tr style="background:#f2f2f2;">{head}</tr>
-  {body}
- </table>
- <p style="margin:28px 0 0;font-size:16px;">
-  <a href="{html.escape(URL)}" style="color:#1a56db;">Abrir la web de prácticas</a></p>
- <p style="margin:20px 0 0;font-size:13px;color:#8a8a8a;">Detectado el {now}</p>
-</div></body></html>"""
+    return envoltorio(
+        f'<p style="margin:0 0 24px;">{intro}</p>{tabla_html(rows)}{enlace_web()}'
+        f'<p style="margin:20px 0 0;font-size:13px;color:#8a8a8a;">Detectado el {now}</p>'
+    )
 
 
 def build_text(rows, now):
@@ -101,25 +152,21 @@ def build_text(rows, now):
     return "\n".join(out)
 
 
-def build_html_sin_cambios(total, now):
-    if total:
-        detalle = (
-            f"Ahora mismo hay <b>{total} {'práctica' if total == 1 else 'prácticas'}</b> "
-            "en la web, pero ninguna nueva desde la última comprobación."
+def build_html_sin_cambios(rows, now):
+    n = len(rows)
+    if n:
+        extra = (
+            f'<p style="margin:24px 0 12px;">Disponibles ahora en la web '
+            f'(<b>{n}</b>), ya conocidas:</p>{tabla_html(rows)}'
         )
     else:
-        detalle = "No hay prácticas nuevas desde la última comprobación."
-    return f"""\
-<!DOCTYPE html>
-<html lang="es"><body style="margin:0;padding:0;background:#ffffff;">
-<div style="font-family:Arial,Helvetica,sans-serif;color:#1a1a1a;max-width:640px;
- margin:0 auto;padding:20px 16px;font-size:18px;line-height:1.5;">
- <p style="margin:0 0 12px;"><b>Sin novedades.</b></p>
- <p style="margin:0 0 24px;">{detalle}</p>
- <p style="margin:0;font-size:16px;">
-  <a href="{html.escape(URL)}" style="color:#1a56db;">Abrir la web de prácticas</a></p>
- <p style="margin:20px 0 0;font-size:13px;color:#8a8a8a;">Comprobado el {now}</p>
-</div></body></html>"""
+        extra = '<p style="margin:0 0 12px;">Ahora mismo no hay prácticas disponibles.</p>'
+    return envoltorio(
+        '<p style="margin:0 0 12px;"><b>Sin novedades.</b> '
+        'No hay prácticas nuevas desde la última comprobación.</p>'
+        f'{extra}{enlace_web()}'
+        f'<p style="margin:20px 0 0;font-size:13px;color:#8a8a8a;">Comprobado el {now}</p>'
+    )
 
 
 def mask(addr):
@@ -163,10 +210,10 @@ def toca_aviso_sin_cambios():
     return time.time() - ultimo >= AVISAR_CADA_MIN * 60 - 30  # margen por la duración de cada vuelta
 
 
-def send_sin_cambios(total):
+def send_sin_cambios(rows):
     now = now_madrid()
-    texto = f"Sin novedades en las prácticas.\nComprobado el {now}\nWeb: {URL}"
-    deliver(SUBJECT_SIN_CAMBIOS, texto, build_html_sin_cambios(total, now))
+    texto = f"Sin novedades en las prácticas ({len(rows)} disponibles ya conocidas).\nComprobado el {now}\nWeb: {URL}"
+    deliver(SUBJECT_SIN_CAMBIOS, texto, build_html_sin_cambios(rows, now))
 
 
 # ---------- estado ----------
@@ -174,10 +221,9 @@ def load_state():
     if not STATE.exists():
         return None
     data = json.loads(STATE.read_text())
-    # Formatos antiguos: se vuelve a guardar sin avisar
     if isinstance(data, dict) and data.get("mode") == "classes":
         return data
-    return {"mode": "legacy", "items": []}
+    return {"mode": "legacy", "items": []}  # formatos antiguos: se reinicia sin avisar
 
 
 def save_state(current):
@@ -192,8 +238,9 @@ def main():
 
     current = parse_classes(text)
     print(f"{len(current)} prácticas detectadas en la web")
-    if not current and re.search(TIME, text):
-        print("AVISO: hay horas en la web pero no reconozco el formato de las prácticas.")
+    m = re.search(r"(\d+)\s*\n\s*Disponibles", text)
+    if m and int(m.group(1)) != len(current):
+        print(f"AVISO: la web dice {m.group(1)} disponibles pero he leído {len(current)}.")
 
     state = load_state()
     if state is None or state["mode"] == "legacy":
@@ -210,7 +257,7 @@ def main():
     else:
         print("Sin cambios.")
         if toca_aviso_sin_cambios():
-            send_sin_cambios(len(current))
+            send_sin_cambios(list(current.values()))
             HEARTBEAT_FILE.write_text(str(time.time()))
 
     if set(current) != previous:
