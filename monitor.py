@@ -46,7 +46,15 @@ def fetch_page():
             page.wait_for_selector("text=Disponibles", timeout=30000)
         except Exception:
             pass
-        page.wait_for_timeout(3000)  # margen para que carguen las tarjetas
+        page.wait_for_timeout(2000)  # margen para que carguen las tarjetas
+        # Asegura que se lee la pestaña "Disponibles" (y no "Todas" o "Mis reservas")
+        for sel in ('button:text-is("Disponibles")', '[role="tab"]:text-is("Disponibles")'):
+            try:
+                page.locator(sel).first.click(timeout=3000)
+                break
+            except Exception:
+                continue
+        page.wait_for_timeout(1500)
         text = page.inner_text("body")
         browser.close()
     return text
@@ -64,8 +72,14 @@ def orden_fecha(fecha_txt, hora):
         return (9999, 0, 0, hora)
 
 
+LUGAR_RE = re.compile(r"\b(zona|parking|renfe|aparcamiento)\b", re.IGNORECASE)
+TIPO_RE = re.compile(r"^(autom[aá]tic[oa]|manual)$", re.IGNORECASE)
+RESERVADA_RE = re.compile(r"^reservada$", re.IGNORECASE)
+ETIQUETA_RE = re.compile(r"^(nueva|nuevo|disponible|ocupada|cancelada)$", re.IGNORECASE)
+
+
 def parse_classes(text):
-    """Lee las tarjetas: día (título), hora inicio/fin, tipo, profesor, coche, lugar y precio."""
+    """Lee las tarjetas sin depender del orden: día (título), horas, tipo, profesor, coche, lugar y precio."""
     lines = [l.strip() for l in text.splitlines() if l.strip()]
     found = {}
     fecha = None
@@ -81,21 +95,40 @@ def parse_classes(text):
             if j < len(lines) and TIME_RE.match(lines[j]):
                 fin, j = lines[j], j + 1
             tokens = []
-            while j < len(lines) and not DAY_RE.match(lines[j]) and not TIME_RE.match(lines[j]):
+            while (j < len(lines) and not DAY_RE.match(lines[j]) and not TIME_RE.match(lines[j])
+                   and not lines[j].lower().startswith("made with")):
                 tokens.append(lines[j])
                 j += 1
-            precio = "—"
-            for k, t in enumerate(tokens):
-                if "€" in t:
-                    precio, tokens = t, tokens[:k]  # lo que hay tras el precio (pie de página) se descarta
-                    break
-            if len(tokens) >= 4:
-                _tipo, profe, coche, lugar = tokens[:4]
-            else:
-                profe, coche, lugar = (tokens + ["—"] * 3)[:3]
+
+            precio, tipo, lugar, resto, reservada = "", "", "", [], False
+            for t in tokens:
+                if RESERVADA_RE.match(t):
+                    reservada = True
+                elif ETIQUETA_RE.match(t):
+                    continue  # etiquetas sueltas que no son datos de la práctica
+                elif "€" in t:
+                    precio = precio or t
+                elif TIPO_RE.match(t) and not tipo:
+                    tipo = t
+                elif LUGAR_RE.search(t) and not lugar:
+                    lugar = t
+                else:
+                    resto.append(t)
+            if reservada:  # ya reservada: no es una práctica disponible
+                i = j
+                continue
+            profe = resto[0] if resto else "—"
+            coche = resto[1] if len(resto) > 1 else "—"
+            if not lugar and len(resto) > 2:
+                lugar = resto[2]
+            if not lugar:
+                lugar = "—"
+                print(f"DEBUG tarjeta sin lugar: {fecha} {inicio} -> {tokens[:8]}")
+
             hora = f"{inicio}-{fin}" if fin else inicio
             clave = f"{fecha}|{hora}|{profe}|{coche}|{lugar}"
-            found[clave] = (fecha, hora, coche, profe, lugar, precio)
+            coche_txt = f"{coche} ({tipo})" if tipo else coche
+            found[clave] = (fecha, hora, coche_txt, profe, lugar, precio or "—")
             i = j
             continue
         i += 1
